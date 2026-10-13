@@ -3,7 +3,8 @@
 //
 //   finance.holdings/1       signed by the CUSTODIAN for each as-of date: one Merkle root over
 //                            every position, the count, and totals by type. Chained day to day.
-//                            Any single position can be proven without revealing the rest.
+//                            Any single position can be proven without revealing the rest
+//                            (salted leaves, see below).
 //   finance.reserve/1        signed by the ISSUER: a fingerprint of a reserve report, its totals
 //                            and the period it covers.
 //   finance.countersign/1    signed by the issuer's ACCOUNTANT: names one reserve record.
@@ -13,24 +14,41 @@
 //                            did not arrive.
 //
 // Amounts are integer cents.
-import { createHash } from "node:crypto";
+import { createHash, randomBytes } from "node:crypto";
 import { signRecord } from "../lib/record.mjs";
 import { leafHash, buildTree, proof, verifyProof } from "../lib/merkle.mjs";
 
 export const fileFingerprint = (bytes) => "0x" + createHash("sha256").update(bytes).digest("hex");
-const leaf = (s) => leafHash(Buffer.from(s, "utf8"));
+// Leaves are salted (salted-leaf/1): each item gets 16 random bytes, and leaves are ordered by
+// their salted hash. Without the salt, the sibling hashes in one item's proof could be matched
+// against guessed values to reveal the items next to it. The salt travels only in that item's
+// own proof. saltOf(key) can be supplied for reproducible commitments.
+export const LEAF_SCHEME = "salted-leaf/1";
+const SALT_RE = /^[0-9a-f]{32}$/;
+const randomSalt = () => randomBytes(16).toString("hex");
+const saltedLeaf = (salt, s) => leafHash(Buffer.from(`${salt}|${s}`, "utf8"));
+function commitSalted(keys, saltOf = randomSalt) {
+  const entries = keys.map((key) => {
+    const salt = saltOf(key);
+    if (!SALT_RE.test(salt)) throw new Error("salt must be 32 lowercase hex characters");
+    return { key, salt, leaf: saltedLeaf(salt, key) };
+  }).sort((a, b) => (a.leaf < b.leaf ? -1 : a.leaf > b.leaf ? 1 : 0));
+  const tree = buildTree(entries.map((e) => e.leaf));
+  return { root: tree.root, count: entries.length, scheme: LEAF_SCHEME, keys: entries.map((e) => e.key), salts: entries.map((e) => e.salt), tree };
+}
+const saltedProof = (c, key) => { const i = c.keys.indexOf(key); return i < 0 ? null : { index: i, salt: c.salts[i], branch: proof(c.tree, i) }; };
+const saltedMember = (root, count, key, p) => !!p && SALT_RE.test(p.salt) && p.index >= 0 && p.index < count && verifyProof(saltedLeaf(p.salt, key), p.branch, p.index, root);
 export const positionKey = (p) => `${p.id}|${p.type}|${p.parCents}|${p.valueCents}|${p.maturity}`;
 
-export function commitPositions(positions) {
-  const keys = positions.map(positionKey).sort();
+export function commitPositions(positions, { saltOf } = {}) {
+  const keys = positions.map(positionKey);
   if (new Set(keys).size !== keys.length) throw new Error("commitPositions: duplicate position");
-  const tree = buildTree(keys.map(leaf));
   const totalsByType = {};
   for (const p of positions) totalsByType[p.type] = (totalsByType[p.type] || 0) + p.valueCents;
-  return { root: tree.root, count: keys.length, keys, tree, totalsByType, totalCents: positions.reduce((a, p) => a + p.valueCents, 0) };
+  return { ...commitSalted(keys, saltOf), totalsByType, totalCents: positions.reduce((a, p) => a + p.valueCents, 0) };
 }
-export const positionProof = (c, p) => { const i = c.keys.indexOf(positionKey(p)); return i < 0 ? null : { index: i, branch: proof(c.tree, i) }; };
-export const positionIncluded = (rec, p, pr) => !!pr && pr.index >= 0 && pr.index < rec.positionCount && verifyProof(leaf(positionKey(p)), pr.branch, pr.index, rec.positionsRoot);
+export const positionProof = (c, p) => saltedProof(c, positionKey(p));
+export const positionIncluded = (rec, p, pr) => saltedMember(rec.positionsRoot, rec.positionCount, positionKey(p), pr);
 
 export const holdings = (kp, { fund, custodian, asOf, seq, prev, c }) =>
   signRecord(kp, { kind: "finance.holdings/1", fund, custodian, asOf, seq, prev, positionsRoot: c.root, positionCount: c.count, totalsByType: c.totalsByType, totalCents: c.totalCents });

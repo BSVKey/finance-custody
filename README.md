@@ -4,7 +4,7 @@ Verifiable holdings attestations, reserve reports and recorded data releases.
 
 Tokenized funds and stablecoins say their tokens are backed by real assets. Here the
 custodian signs each day's holdings as one Merkle root over every position, so any single
-position can be proven without revealing the rest; the issuer signs each reserve report,
+position can be proven without revealing the rest (each leaf is salted, so one proof cannot be used to guess its neighbours); the issuer signs each reserve report,
 and its accountant countersigns the exact version it reviewed; a missing attestation is
 itself a signed record. A recording service fingerprints published data files, such as
 yield curves, at the moment they are fetched.

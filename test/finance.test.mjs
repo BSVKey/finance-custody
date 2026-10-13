@@ -70,3 +70,13 @@ test("a recorded release matches the fetched bytes and nothing else", () => {
   assert.equal(checkRelease(rr, Buffer.from("a,b\n1,3\n"), { recorderPub: rec.pub }).same, false);
   assert.equal(checkRelease(rr, bytes, { recorderPub: genKeypair().pub }).ok, false);
 });
+
+test("a position proof does not give away the positions beside it", async () => {
+  const { leafHash } = await import("../lib/merkle.mjs");
+  const { positionKey } = await import("../src/records.mjs");
+  const ps = Array.from({ length: 8 }, (_, i) => ({ id: `T-${i}`, type: "tbill", parCents: 100_000_00, valueCents: 99_500_00, maturity: "2027-01-15" }));
+  const c = commitPositions(ps);
+  const pr = positionProof(c, ps[3]);
+  assert.equal(ps.map((p) => leafHash(Buffer.from(positionKey(p), "utf8"))).includes(pr.branch[0]), false);
+  assert.equal(positionIncluded({ positionsRoot: c.root, positionCount: c.count }, ps[3], { ...pr, salt: undefined }), false);
+});
